@@ -29,7 +29,7 @@ MAX_FILE_SIZE = 8 * 1024 * 1024
 MAX_SCAN_ITEMS = 3000
 IGNORED_FILE_NAMES = {"vstermu-installer.py"}
 ENV_NOTICE = "Sorry, but for your protection, this feature is disabled by default. Go to Termux, and in the command tab created when you ran it, there will be a command line \">>>\". Type \".env enable\"."
-LOADING_LIMIT_MS = 10000
+LOADING_LIMIT_MS = 1500
 
 app = Flask(__name__)
 app.config["SOCK_SERVER_OPTIONS"] = {"ping_interval": 25}
@@ -7750,7 +7750,7 @@ if(time){
 
 const seconds=
 Math.min(
-10,
+2,
 Math.floor(
 elapsed/1000
 )
@@ -7759,7 +7759,7 @@ elapsed/1000
 time.textContent=
 seconds
 +
-' / 10 seconds';
+' / 2 seconds';
 }
 
 if(progress<1){
@@ -7889,7 +7889,7 @@ e.message
 
 }finally{
 
-hideWelcome();
+void 0;
 }
 
 connectTerminal();
