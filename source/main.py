@@ -2025,46 +2025,8 @@ border:0;
 background:none
 }
 
-#welcomeScreen{
-position:fixed;
-inset:0;
-background:var(--bg);
-z-index:1000;
-display:flex;
-align-items:center;
-justify-content:center;
-transition:opacity .35s ease,visibility .35s ease
-}
 
-#welcomeScreen.hide{
-opacity:0;
-visibility:hidden;
-pointer-events:none
-}
 
-.welcome-inner{
-display:flex;
-flex-direction:column;
-align-items:center;
-gap:15px;
-text-align:center
-}
-
-.welcome-logo{
-width:62px;
-height:62px
-}
-
-.welcome-title{
-font-size:24px;
-font-weight:700;
-letter-spacing:-.02em
-}
-
-.welcome-label{
-color:var(--muted);
-font-size:12px
-}
 
 .stretch-loader{
 display:flex;
@@ -2104,30 +2066,8 @@ transform:scaleX(1.2)
 }
 }
 
-.loading-range{
-width:min(220px,62vw);
-height:4px;
-border-radius:999px;
-overflow:hidden;
-background:var(--panel2);
-border:1px solid var(--border);
-margin-top:2px
-}
 
-.loading-range-fill{
-width:0%;
-height:100%;
-background:var(--accent);
-border-radius:999px;
-transform-origin:left center;
-will-change:width
-}
 
-.loading-range-time{
-font-size:10px;
-color:var(--muted);
-margin-top:-7px
-}
 
 #app{
 height:100%;
@@ -2814,13 +2754,6 @@ z-index:15
 display:block
 }
 
-.loading{
-position:absolute;
-right:15px;
-top:12px;
-font-size:10px;
-color:var(--muted)
-}
 
 .setting-toggle{
 display:flex;
@@ -3005,9 +2938,6 @@ width:24px;
 height:24px
 }
 
-.loading-range{
-width:min(200px,64vw)
-}
 
 }
 </style>
@@ -3015,10 +2945,6 @@ width:min(200px,64vw)
 
 <body>
 
-<div id="welcomeScreen">
-<div class="welcome-inner">
-<img class="welcome-logo" src="https://raw.githubusercontent.com/joaoTYSM/VStermu/refs/heads/main/icon.svg">
-<div class="welcome-title">Welcome!</div>
 <div class="welcome-label">VStermu-x</div>
 <div class="stretch-loader">
 <span></span>
@@ -3520,9 +3446,6 @@ let recentFiles=[];
 let liveActive=false;
 let liveTimer=null;
 let liveFrameReady=false;
-let welcomeHidden=false;
-let welcomeStartedAt=performance.now();
-let welcomeAnimationFrame=null;
 
 const editor=CodeMirror.fromTextArea(
 $('editor'),
@@ -7715,111 +7638,6 @@ fitTerminal,
 }
 );
 
-function updateLoadingRange(){
-
-if(
-welcomeHidden
-)
-return;
-
-const elapsed=
-performance.now()
--
-welcomeStartedAt;
-
-const progress=
-Math.max(
-0,
-Math.min(
-1,
-elapsed/LOADING_LIMIT_MS
-)
-);
-
-const fill=
-$('loadingRangeFill');
-
-const time=
-$('loadingRangeTime');
-
-if(fill)
-fill.style.width=
-(progress*100).toFixed(3)+'%';
-
-if(time){
-
-const seconds=
-Math.min(
-2,
-Math.floor(
-elapsed/1000
-)
-);
-
-time.textContent=
-seconds
-+
-' / 2 seconds';
-}
-
-if(progress<1){
-
-welcomeAnimationFrame=
-requestAnimationFrame(
-updateLoadingRange
-);
-
-}else{
-
-hideWelcome();
-}
-}
-
-function hideWelcome(){
-
-if(
-welcomeHidden
-)
-return;
-
-welcomeHidden=true;
-
-const screen=
-$('welcomeScreen');
-
-if(
-screen
-&&
-!screen.classList.contains(
-'hide'
-)
-)
-screen.classList.add(
-'hide'
-);
-
-if(
-welcomeAnimationFrame!==null
-){
-
-cancelAnimationFrame(
-welcomeAnimationFrame
-);
-
-welcomeAnimationFrame=null;
-}
-
-fitTerminal();
-}
-
-requestAnimationFrame(
-updateLoadingRange
-);
-
-setTimeout(
-hideWelcome,
-LOADING_LIMIT_MS
-);
 
 async function init(){
 
