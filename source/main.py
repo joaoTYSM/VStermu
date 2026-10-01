@@ -15,7 +15,7 @@ from pathlib import Path
 from flask import Flask, request, jsonify, Response
 from flask_sock import Sock
 
-APP_NAME = "vstermu PRO"
+APP_NAME = "VStermu-x"
 HOST = "127.0.0.1"
 PORT = int(os.environ.get("VSTERMU_PORT", "8000"))
 HOME = os.path.realpath(os.path.expanduser("~"))
@@ -27,8 +27,11 @@ STYLE_FILE = os.path.join(STYLE_DIR, "style.json")
 STATE_FILE = os.path.join(SCRIPTS_SAVE, "state.json")
 MAX_FILE_SIZE = 8 * 1024 * 1024
 MAX_SCAN_ITEMS = 3000
+IGNORED_FILE_NAMES = {"vstermu-installer.py"}
+ENV_NOTICE = "Sorry, but for your protection, this feature is disabled by default. Go to Termux, and in the command tab created when you ran it, there will be a command line \">>>\". Type \".env enable\"."
 
 app = Flask(__name__)
+app.config["SOCK_SERVER_OPTIONS"] = {"ping_interval": 25}
 sock = Sock(app)
 
 DEFAULT_STYLE = {
@@ -93,27 +96,9 @@ EXTENSIONS = {
 }
 
 
-def ensure_data_files():
-    os.makedirs(SCRIPTS_SAVE, exist_ok=True)
-    os.makedirs(STYLE_DIR, exist_ok=True)
-
-    if not os.path.exists(STYLE_FILE):
-        atomic_json_write(STYLE_FILE, DEFAULT_STYLE)
-
-    if not os.path.exists(STATE_FILE):
-        atomic_json_write(
-            STATE_FILE,
-            {
-                "openFiles": [],
-                "lastFile": None
-            }
-        )
-
-
 def atomic_json_write(path, value):
     directory = os.path.dirname(path)
     os.makedirs(directory, exist_ok=True)
-
     fd, temp = tempfile.mkstemp(
         prefix=".vstemu-",
         dir=directory,
@@ -146,6 +131,132 @@ def load_json(path, fallback):
         return fallback
 
 
+def default_state():
+    return {
+        "openFiles": [],
+        "lastFile": None,
+        "envEnabled": False
+    }
+
+
+def get_state():
+    state = load_json(
+        STATE_FILE,
+        default_state()
+    )
+
+    if not isinstance(state, dict):
+        state = default_state()
+
+    if not isinstance(
+        state.get("openFiles"),
+        list
+    ):
+        state["openFiles"] = []
+
+    if "lastFile" not in state:
+        state["lastFile"] = None
+
+    state["envEnabled"] = bool(
+        state.get("envEnabled", False)
+    )
+
+    return state
+
+
+def set_env_enabled(enabled):
+    state = get_state()
+
+    state["envEnabled"] = bool(enabled)
+
+    atomic_json_write(
+        STATE_FILE,
+        state
+    )
+
+    return state["envEnabled"]
+
+
+def env_enabled():
+    return get_state()["envEnabled"]
+
+
+def is_env_file(path):
+    name = os.path.basename(
+        os.path.realpath(path)
+    ).lower()
+
+    return (
+        name == ".env"
+        or name.startswith(".env.")
+    )
+
+
+def protect_env_content(content):
+    result = []
+
+    for line in content.splitlines(
+        keepends=True
+    ):
+        newline = ""
+        raw = line
+
+        if raw.endswith("\r\n"):
+            raw = raw[:-2]
+            newline = "\r\n"
+
+        elif (
+            raw.endswith("\n")
+            or raw.endswith("\r")
+        ):
+            newline = raw[-1]
+            raw = raw[:-1]
+
+        if (
+            not raw.strip()
+            or raw.lstrip().startswith("#")
+            or "=" not in raw
+        ):
+            result.append(
+                raw + newline
+            )
+            continue
+
+        key, _, _ = raw.partition("=")
+
+        result.append(
+            key
+            + "=[value hidden]"
+            + newline
+        )
+
+    return "".join(result)
+
+
+def ensure_data_files():
+    os.makedirs(
+        SCRIPTS_SAVE,
+        exist_ok=True
+    )
+
+    os.makedirs(
+        STYLE_DIR,
+        exist_ok=True
+    )
+
+    if not os.path.exists(STYLE_FILE):
+        atomic_json_write(
+            STYLE_FILE,
+            DEFAULT_STYLE
+        )
+
+    if not os.path.exists(STATE_FILE):
+        atomic_json_write(
+            STATE_FILE,
+            default_state()
+        )
+
+
 def roots():
     result = [
         {
@@ -174,7 +285,10 @@ def allowed(path):
         HOME,
         os.path.realpath(SHARED)
     ):
-        if real == root or real.startswith(root + os.sep):
+        if (
+            real == root
+            or real.startswith(root + os.sep)
+        ):
             return real
 
     raise PermissionError(
@@ -187,7 +301,10 @@ def safe_path(path):
         return HOME
 
     if not os.path.isabs(path):
-        path = os.path.join(HOME, path)
+        path = os.path.join(
+            HOME,
+            path
+        )
 
     return allowed(path)
 
@@ -204,27 +321,46 @@ def rel_label(path):
         return "/storage/emulated/0"
 
     if real.startswith(HOME + os.sep):
-        return "~/" + os.path.relpath(real, HOME)
+        return (
+            "~/"
+            + os.path.relpath(
+                real,
+                HOME
+            )
+        )
 
     if real.startswith(shared + os.sep):
-        return "/storage/emulated/0/" + os.path.relpath(
-            real,
-            shared
+        return (
+            "/storage/emulated/0/"
+            + os.path.relpath(
+                real,
+                shared
+            )
         )
 
     return real
 
 
-def file_icon(name, directory=False):
+def file_icon(
+    name,
+    directory=False
+):
     if directory:
         return "fa-solid fa-folder"
 
     lower = name.lower()
 
-    if lower == ".env" or lower.startswith(".env."):
+    if (
+        lower == ".env"
+        or lower.startswith(".env.")
+    ):
         return EXTENSIONS["env"]
 
-    ext = lower.rsplit(".", 1)[-1] if "." in lower else ""
+    ext = (
+        lower.rsplit(".", 1)[-1]
+        if "." in lower
+        else ""
+    )
 
     return EXTENSIONS.get(
         ext,
@@ -244,6 +380,14 @@ def list_directory(path):
         for entry in scan:
             if len(entries) >= MAX_SCAN_ITEMS:
                 break
+
+            if (
+                not entry.is_dir(
+                    follow_symlinks=False
+                )
+                and entry.name in IGNORED_FILE_NAMES
+            ):
+                continue
 
             try:
                 is_dir = entry.is_dir(
@@ -275,6 +419,13 @@ def list_directory(path):
                         "mtime": stat.st_mtime,
                         "hidden": entry.name.startswith("."),
                         "symlink": entry.is_symlink(),
+                        "protected": (
+                            not is_dir
+                            and is_env_file(
+                                entry.path
+                            )
+                            and not env_enabled()
+                        ),
                     }
                 )
 
@@ -351,8 +502,13 @@ def is_probably_text(path):
         return True
 
     try:
-        with open(path, "rb") as handle:
-            sample = handle.read(8192)
+        with open(
+            path,
+            "rb"
+        ) as handle:
+            sample = handle.read(
+                8192
+            )
 
         return b"\x00" not in sample
 
@@ -376,16 +532,403 @@ def atomic_write(path, data):
     )
 
     try:
-        with os.fdopen(fd, "wb") as handle:
+        with os.fdopen(
+            fd,
+            "wb"
+        ) as handle:
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
 
-        os.replace(temp, path)
+        os.replace(
+            temp,
+            path
+        )
 
     finally:
         if os.path.exists(temp):
             os.unlink(temp)
+
+
+def parse_lint_error(
+    text,
+    language
+):
+    message = text.strip().splitlines()
+
+    joined = " ".join(
+        x.strip()
+        for x in message
+        if x.strip()
+    )
+
+    line = 0
+    column = 0
+
+    patterns = [
+        r"line (\d+), column (\d+)",
+        r"line (\d+).*?column (\d+)",
+        r":(\d+):(\d+)",
+        r"line (\d+)",
+    ]
+
+    for pattern in patterns:
+        match = re.search(
+            pattern,
+            text,
+            re.I
+        )
+
+        if match:
+            line = max(
+                0,
+                int(match.group(1)) - 1
+            )
+
+            if (
+                match.lastindex
+                and match.lastindex >= 2
+            ):
+                column = max(
+                    0,
+                    int(match.group(2)) - 1
+                )
+
+            break
+
+    if not joined:
+        joined = (
+            "Syntax check failed for "
+            + language
+        )
+
+    return {
+        "line": line,
+        "column": column,
+        "message": joined[:500]
+    }
+
+
+def generic_lint(content):
+    errors = []
+
+    pairs = {
+        "(": ")",
+        "[": "]",
+        "{": "}"
+    }
+
+    reverse = {
+        value: key
+        for key, value in pairs.items()
+    }
+
+    stack = []
+
+    quote = None
+    escaped = False
+    line = 0
+    column = 0
+
+    for char in content:
+        if char == "\n":
+            line += 1
+            column = 0
+            continue
+
+        if quote:
+            if escaped:
+                escaped = False
+
+            elif char == "\\":
+                escaped = True
+
+            elif char == quote:
+                quote = None
+
+            column += 1
+            continue
+
+        if char in (
+            '"',
+            "'",
+            "`"
+        ):
+            quote = char
+            column += 1
+            continue
+
+        if char in pairs:
+            stack.append(
+                (
+                    char,
+                    line,
+                    column
+                )
+            )
+
+        elif char in reverse:
+            if (
+                not stack
+                or stack[-1][0]
+                != reverse[char]
+            ):
+                errors.append(
+                    {
+                        "line": line,
+                        "column": column,
+                        "message": (
+                            f"Unexpected '{char}'"
+                        )
+                    }
+                )
+
+                if len(errors) >= 10:
+                    return errors
+
+            else:
+                stack.pop()
+
+        column += 1
+
+    if quote:
+        errors.append(
+            {
+                "line": line,
+                "column": max(
+                    0,
+                    column - 1
+                ),
+                "message": (
+                    "Unterminated string"
+                )
+            }
+        )
+
+    for (
+        opener,
+        line_number,
+        col
+    ) in reversed(stack[-10:]):
+        errors.append(
+            {
+                "line": line_number,
+                "column": col,
+                "message": (
+                    f"Missing '{pairs[opener]}'"
+                )
+            }
+        )
+
+    return errors
+
+
+def run_lint(
+    content,
+    filename
+):
+    ext = Path(filename).suffix.lower()
+
+    errors = generic_lint(
+        content
+    )
+
+    if errors:
+        return errors
+
+    if ext == ".json":
+        try:
+            json.loads(content)
+
+        except json.JSONDecodeError as exc:
+            return [
+                {
+                    "line": max(
+                        0,
+                        exc.lineno - 1
+                    ),
+                    "column": max(
+                        0,
+                        exc.colno - 1
+                    ),
+                    "message": exc.msg
+                }
+            ]
+
+        return []
+
+    executable_checks = []
+
+    if ext == ".py":
+        executable_checks.append(
+            (
+                "python",
+                [
+                    "python",
+                    "-c",
+                    "compile(open(__import__('sys').argv[1], encoding='utf-8').read(), __import__('sys').argv[1], 'exec')"
+                ]
+            )
+        )
+
+        executable_checks.append(
+            (
+                "python3",
+                [
+                    "python3",
+                    "-c",
+                    "compile(open(__import__('sys').argv[1], encoding='utf-8').read(), __import__('sys').argv[1], 'exec')"
+                ]
+            )
+        )
+
+    elif ext in {
+        ".js",
+        ".mjs",
+        ".cjs"
+    }:
+        executable_checks.append(
+            (
+                "node",
+                [
+                    "node",
+                    "--check"
+                ]
+            )
+        )
+
+    elif ext in {
+        ".sh",
+        ".bash"
+    }:
+        executable_checks.append(
+            (
+                "bash",
+                [
+                    "bash",
+                    "-n"
+                ]
+            )
+        )
+
+    elif ext == ".zsh":
+        executable_checks.append(
+            (
+                "zsh",
+                [
+                    "zsh",
+                    "-n"
+                ]
+            )
+        )
+
+    elif ext == ".php":
+        executable_checks.append(
+            (
+                "php",
+                [
+                    "php",
+                    "-l"
+                ]
+            )
+        )
+
+    elif ext == ".rb":
+        executable_checks.append(
+            (
+                "ruby",
+                [
+                    "ruby",
+                    "-c"
+                ]
+            )
+        )
+
+    elif ext == ".pl":
+        executable_checks.append(
+            (
+                "perl",
+                [
+                    "perl",
+                    "-c"
+                ]
+            )
+        )
+
+    if executable_checks:
+        temp_path = None
+
+        try:
+            fd, temp_path = tempfile.mkstemp(
+                prefix=".vstemu-lint-",
+                suffix=ext or ".txt"
+            )
+
+            with os.fdopen(
+                fd,
+                "w",
+                encoding="utf-8"
+            ) as handle:
+                handle.write(content)
+
+            last_missing = True
+
+            for executable, command in executable_checks:
+                if shutil.which(executable) is None:
+                    continue
+
+                last_missing = False
+
+                full_command = list(command)
+                full_command.append(temp_path)
+
+                try:
+                    completed = subprocess.run(
+                        full_command,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        timeout=2
+                    )
+
+                except (
+                    OSError,
+                    subprocess.SubprocessError
+                ):
+                    continue
+
+                if completed.returncode != 0:
+                    return [
+                        parse_lint_error(
+                            (
+                                completed.stderr
+                                or ""
+                            )
+                            + "\n"
+                            + (
+                                completed.stdout
+                                or ""
+                            ),
+                            executable
+                        )
+                    ]
+
+                return []
+
+            if last_missing:
+                return []
+
+        finally:
+            if (
+                temp_path
+                and os.path.exists(temp_path)
+            ):
+                try:
+                    os.unlink(temp_path)
+                except OSError:
+                    pass
+
+    return []
 
 
 @app.get("/")
@@ -464,6 +1007,16 @@ def api_read():
                 }
             ), 404
 
+        if os.path.basename(path) in IGNORED_FILE_NAMES:
+            return jsonify(
+                {
+                    "error": (
+                        "This file is ignored "
+                        "by VStermu-x"
+                    )
+                }
+            ), 404
+
         size = os.path.getsize(path)
 
         if size > MAX_FILE_SIZE:
@@ -480,8 +1033,8 @@ def api_read():
             return jsonify(
                 {
                     "error": (
-                        "Binary files are not opened "
-                        "in the editor"
+                        "Binary files are not "
+                        "opened in the editor"
                     )
                 }
             ), 415
@@ -494,12 +1047,29 @@ def api_read():
         ) as handle:
             content = handle.read()
 
+        protected = (
+            is_env_file(path)
+            and not env_enabled()
+        )
+
+        if protected:
+            content = protect_env_content(
+                content
+            )
+
         return jsonify(
             {
                 "path": path,
                 "content": content,
                 "size": size,
-                "mtime": os.path.getmtime(path)
+                "mtime": os.path.getmtime(path),
+                "protected": protected,
+                "envEnabled": env_enabled(),
+                "notice": (
+                    ENV_NOTICE
+                    if protected
+                    else ""
+                ),
             }
         )
 
@@ -521,7 +1091,9 @@ def api_read():
 @app.put("/api/write")
 def api_write():
     try:
-        payload = request.get_json(force=True)
+        payload = request.get_json(
+            force=True
+        )
 
         path = safe_path(
             payload.get(
@@ -535,12 +1107,43 @@ def api_write():
             ""
         )
 
-        if not isinstance(content, str):
+        if not isinstance(
+            content,
+            str
+        ):
             return jsonify(
                 {
-                    "error": "Content must be text"
+                    "error": (
+                        "Content must be text"
+                    )
                 }
             ), 400
+
+        if (
+            is_env_file(path)
+            and not env_enabled()
+        ):
+            return jsonify(
+                {
+                    "error": (
+                        "The .env editor is protected. "
+                        "Enable .env values first."
+                    )
+                }
+            ), 403
+
+        if (
+            os.path.basename(path)
+            in IGNORED_FILE_NAMES
+        ):
+            return jsonify(
+                {
+                    "error": (
+                        "This file is ignored "
+                        "by VStermu-x"
+                    )
+                }
+            ), 403
 
         data = content.encode(
             "utf-8"
@@ -585,7 +1188,9 @@ def api_write():
 @app.post("/api/create")
 def api_create():
     try:
-        payload = request.get_json(force=True)
+        payload = request.get_json(
+            force=True
+        )
 
         parent = safe_path(
             payload.get(
@@ -618,6 +1223,16 @@ def api_create():
                 }
             ), 400
 
+        if name in IGNORED_FILE_NAMES:
+            return jsonify(
+                {
+                    "error": (
+                        "This file name is "
+                        "ignored by VStermu-x"
+                    )
+                }
+            ), 400
+
         target = safe_path(
             os.path.join(
                 parent,
@@ -634,6 +1249,7 @@ def api_create():
 
         if kind == "directory":
             os.makedirs(target)
+
         else:
             atomic_write(
                 target,
@@ -665,7 +1281,9 @@ def api_create():
 @app.post("/api/rename")
 def api_rename():
     try:
-        payload = request.get_json(force=True)
+        payload = request.get_json(
+            force=True
+        )
 
         source = safe_path(
             payload.get(
@@ -690,6 +1308,16 @@ def api_rename():
             return jsonify(
                 {
                     "error": "Invalid name"
+                }
+            ), 400
+
+        if name in IGNORED_FILE_NAMES:
+            return jsonify(
+                {
+                    "error": (
+                        "This file name is "
+                        "ignored by VStermu-x"
+                    )
                 }
             ), 400
 
@@ -740,7 +1368,9 @@ def api_rename():
 @app.post("/api/delete")
 def api_delete():
     try:
-        payload = request.get_json(force=True)
+        payload = request.get_json(
+            force=True
+        )
 
         path = safe_path(
             payload.get(
@@ -757,6 +1387,16 @@ def api_delete():
             return jsonify(
                 {
                     "error": "Protected path"
+                }
+            ), 403
+
+        if os.path.basename(path) in IGNORED_FILE_NAMES:
+            return jsonify(
+                {
+                    "error": (
+                        "This file is ignored "
+                        "by VStermu-x"
+                    )
                 }
             ), 403
 
@@ -809,7 +1449,9 @@ def api_style():
 
 @app.put("/api/style")
 def api_style_write():
-    payload = request.get_json(force=True)
+    payload = request.get_json(
+        force=True
+    )
 
     style = dict(DEFAULT_STYLE)
 
@@ -832,29 +1474,31 @@ def api_style_write():
 @app.get("/api/state")
 def api_state():
     return jsonify(
-        load_json(
-            STATE_FILE,
-            {
-                "openFiles": [],
-                "lastFile": None
-            }
-        )
+        get_state()
     )
 
 
 @app.put("/api/state")
 def api_state_write():
-    payload = request.get_json(force=True)
+    payload = request.get_json(
+        force=True
+    )
 
-    state = {
-        "openFiles": payload.get(
-            "openFiles",
-            []
-        )[-20:],
-        "lastFile": payload.get(
-            "lastFile"
-        ),
-    }
+    state = get_state()
+
+    state["openFiles"] = payload.get(
+        "openFiles",
+        []
+    )[-20:]
+
+    state["lastFile"] = payload.get(
+        "lastFile"
+    )
+
+    if "envEnabled" in payload:
+        state["envEnabled"] = bool(
+            payload["envEnabled"]
+        )
 
     atomic_json_write(
         STATE_FILE,
@@ -862,6 +1506,131 @@ def api_state_write():
     )
 
     return jsonify(state)
+
+
+@app.get("/api/env/status")
+def api_env_status():
+    return jsonify(
+        {
+            "enabled": env_enabled(),
+            "notice": ENV_NOTICE
+        }
+    )
+
+
+@app.post("/api/env/set")
+def api_env_set():
+    payload = request.get_json(
+        force=True
+    )
+
+    enabled = bool(
+        payload.get(
+            "enabled",
+            False
+        )
+    )
+
+    value = set_env_enabled(
+        enabled
+    )
+
+    return jsonify(
+        {
+            "ok": True,
+            "enabled": value
+        }
+    )
+
+
+@app.post("/api/lint")
+def api_lint():
+    try:
+        payload = request.get_json(
+            force=True
+        )
+
+        content = payload.get(
+            "content",
+            ""
+        )
+
+        filename = os.path.basename(
+            str(
+                payload.get(
+                    "filename",
+                    "untitled.txt"
+                )
+            )
+        )
+
+        if not isinstance(
+            content,
+            str
+        ):
+            return jsonify(
+                {
+                    "errors": [
+                        {
+                            "line": 0,
+                            "column": 0,
+                            "message": (
+                                "Content must be text"
+                            )
+                        }
+                    ]
+                }
+            )
+
+        if (
+            filename in IGNORED_FILE_NAMES
+            or is_env_file(filename)
+        ):
+            return jsonify(
+                {
+                    "errors": []
+                }
+            )
+
+        if len(
+            content.encode("utf-8")
+        ) > MAX_FILE_SIZE:
+            return jsonify(
+                {
+                    "errors": [
+                        {
+                            "line": 0,
+                            "column": 0,
+                            "message": (
+                                "Lint skipped because "
+                                "the file is too large"
+                            )
+                        }
+                    ]
+                }
+            )
+
+        return jsonify(
+            {
+                "errors": run_lint(
+                    content,
+                    filename
+                )[:10]
+            }
+        )
+
+    except Exception as exc:
+        return jsonify(
+            {
+                "errors": [
+                    {
+                        "line": 0,
+                        "column": 0,
+                        "message": str(exc)
+                    }
+                ]
+            }
+        ), 500
 
 
 @app.get("/api/info")
@@ -875,6 +1644,7 @@ def api_info():
             "python": os.sys.version,
             "platform": os.uname().sysname,
             "cwd": os.getcwd(),
+            "envEnabled": env_enabled(),
         }
     )
 
@@ -894,6 +1664,21 @@ class TerminalSession:
         try:
             with self.lock:
                 self.ws.send(data)
+
+        except Exception:
+            self.closed.set()
+
+    def send_control(self, payload):
+        try:
+            with self.lock:
+                self.ws.send(
+                    json.dumps(
+                        {
+                            "__vstermu": payload
+                        }
+                    )
+                )
+
         except Exception:
             self.closed.set()
 
@@ -920,7 +1705,7 @@ class TerminalSession:
             {
                 "TERM": "xterm-256color",
                 "COLORTERM": "truecolor",
-                "TERM_PROGRAM": "vstermu",
+                "TERM_PROGRAM": "VStermu-x",
                 "LANG": env.get(
                     "LANG",
                     "C.UTF-8"
@@ -940,9 +1725,20 @@ class TerminalSession:
                     0
                 )
 
-                os.dup2(slave, 0)
-                os.dup2(slave, 1)
-                os.dup2(slave, 2)
+                os.dup2(
+                    slave,
+                    0
+                )
+
+                os.dup2(
+                    slave,
+                    1
+                )
+
+                os.dup2(
+                    slave,
+                    2
+                )
 
                 if slave > 2:
                     os.close(slave)
@@ -1027,18 +1823,39 @@ class TerminalSession:
                     errors="replace"
                 )
             )
+
         except OSError:
             self.closed.set()
 
-    def set_size(self, cols, rows):
+    def set_size(
+        self,
+        cols,
+        rows
+    ):
         if self.fd is None:
             return
 
         try:
+            cols = max(
+                2,
+                min(
+                    int(cols),
+                    500
+                )
+            )
+
+            rows = max(
+                1,
+                min(
+                    int(rows),
+                    300
+                )
+            )
+
             packed = struct.pack(
                 "HHHH",
-                int(rows),
-                int(cols),
+                rows,
+                cols,
                 0,
                 0
             )
@@ -1055,7 +1872,11 @@ class TerminalSession:
                     signal.SIGWINCH
                 )
 
-        except OSError:
+        except (
+            OSError,
+            ValueError,
+            TypeError
+        ):
             pass
 
     def close(self):
@@ -1070,12 +1891,16 @@ class TerminalSession:
                     self.pid,
                     signal.SIGHUP
                 )
+
         except OSError:
             pass
 
         try:
             if self.fd is not None:
-                os.close(self.fd)
+                os.close(
+                    self.fd
+                )
+
         except OSError:
             pass
 
@@ -1093,14 +1918,20 @@ def terminal(ws):
             if message is None:
                 break
 
-            if isinstance(message, bytes):
+            if isinstance(
+                message,
+                bytes
+            ):
                 message = message.decode(
                     "utf-8",
                     errors="replace"
                 )
 
             try:
-                packet = json.loads(message)
+                packet = json.loads(
+                    message
+                )
+
             except Exception:
                 packet = {
                     "type": "input",
@@ -1138,13 +1969,11 @@ def terminal(ws):
                 )
 
                 if os.path.isdir(path):
-                    command = (
+                    session.write(
                         "cd -- "
                         + shell_quote(path)
                         + "\n"
                     )
-
-                    session.write(command)
 
     except Exception:
         pass
@@ -1154,10 +1983,14 @@ def terminal(ws):
 
 
 def shell_quote(value):
-    return "'" + value.replace(
-        "'",
-        "'\\''"
-    ) + "'"
+    return (
+        "'"
+        + value.replace(
+            "'",
+            "'\\''"
+        )
+        + "'"
+    )
 
 
 PAGE = r'''<!doctype html>
@@ -1166,7 +1999,7 @@ PAGE = r'''<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
 <meta name="theme-color" content="#0b0d10">
-<title>vstermu PRO</title>
+<title>VStermu-x</title>
 <link rel="icon" href="https://raw.githubusercontent.com/joaoTYSM/VStermu/refs/heads/main/icon.svg">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Fira+Code:wght@400;500;600&display=swap" rel="stylesheet">
@@ -1175,6 +2008,8 @@ PAGE = r'''<!doctype html>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.20/theme/material-darker.min.css">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.20/theme/dracula.min.css">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.20/theme/eclipse.min.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.20/addon/hint/show-hint.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.20/addon/lint/lint.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
 
 <style>
@@ -1250,6 +2085,87 @@ border:0;
 background:none
 }
 
+#welcomeScreen{
+position:fixed;
+inset:0;
+background:var(--bg);
+z-index:1000;
+display:flex;
+align-items:center;
+justify-content:center;
+transition:opacity .35s ease,visibility .35s ease
+}
+
+#welcomeScreen.hide{
+opacity:0;
+visibility:hidden;
+pointer-events:none
+}
+
+.welcome-inner{
+display:flex;
+flex-direction:column;
+align-items:center;
+gap:15px;
+text-align:center
+}
+
+.welcome-logo{
+width:62px;
+height:62px
+}
+
+.welcome-title{
+font-size:24px;
+font-weight:700;
+letter-spacing:-.02em
+}
+
+.welcome-label{
+color:var(--muted);
+font-size:12px
+}
+
+.stretch-loader{
+display:flex;
+gap:6px;
+height:14px;
+align-items:center
+}
+
+.stretch-loader span{
+width:7px;
+height:7px;
+border-radius:2px;
+background:var(--text);
+animation:stretchDot 900ms ease-in-out infinite
+}
+
+.stretch-loader span:nth-child(2){
+animation-delay:120ms
+}
+
+.stretch-loader span:nth-child(3){
+animation-delay:240ms
+}
+
+@keyframes stretchDot{
+0%,100%{
+height:7px;
+transform:scaleX(1)
+}
+
+45%{
+height:14px;
+transform:scaleX(1.8)
+}
+
+70%{
+height:9px;
+transform:scaleX(1.2)
+}
+}
+
 #app{
 height:100%;
 display:grid;
@@ -1280,12 +2196,6 @@ width:27px;
 height:27px
 }
 
-.brand small{
-font-weight:500;
-color:var(--muted);
-font-size:10px
-}
-
 .top-actions{
 display:flex;
 align-items:center;
@@ -1310,14 +2220,6 @@ transform:scale(.97)
 display:flex;
 gap:7px;
 align-items:center
-}
-
-.status-dot{
-width:7px;
-height:7px;
-border-radius:50%;
-background:var(--accent);
-box-shadow:0 0 10px var(--accent)
 }
 
 .workspace{
@@ -1450,6 +2352,14 @@ color:#9da7b5
 color:#e3b765
 }
 
+.tree-row.env-protected .name{
+font-style:italic
+}
+
+.tree-row.env-protected .file-icon{
+color:var(--danger)
+}
+
 .tree-empty{
 padding:20px;
 color:var(--muted);
@@ -1462,7 +2372,12 @@ min-width:0;
 min-height:0;
 display:grid;
 grid-template-rows:minmax(180px,1fr) var(--term);
-position:relative
+position:relative;
+overflow:visible
+}
+
+.main.terminal-minimized{
+grid-template-rows:minmax(180px,1fr) 34px
 }
 
 .editor{
@@ -1537,6 +2452,21 @@ border-right:1px solid var(--border)!important
 color:#68717c
 }
 
+.CodeMirror-lint-mark-error,
+.CodeMirror-lint-mark-warning{
+background-image:none!important;
+border-bottom:2px wavy var(--danger)
+}
+
+.CodeMirror-lint-tooltip{
+z-index:500;
+background:var(--panel);
+border:1px solid var(--border);
+color:var(--text);
+box-shadow:var(--shadow);
+font-size:11px
+}
+
 .empty-editor{
 position:absolute;
 inset:0;
@@ -1564,13 +2494,55 @@ font-size:15px
 display:none!important
 }
 
+.editor-protection{
+position:absolute;
+left:12px;
+right:12px;
+top:10px;
+z-index:5;
+background:var(--panel);
+border:1px solid var(--border);
+border-radius:8px;
+padding:9px 11px;
+font-size:11px;
+line-height:1.45;
+color:var(--muted);
+box-shadow:var(--shadow)
+}
+
+.editor-protection strong{
+color:var(--text)
+}
+
+.loading{
+position:absolute;
+right:15px;
+top:12px;
+font-size:10px;
+color:var(--muted)
+}
+
 .terminal{
 min-height:0;
 background:#070909;
 color:#dce8df;
 border-top:1px solid var(--border);
 display:flex;
-flex-direction:column
+flex-direction:column;
+position:relative
+}
+
+.terminal-resizer{
+height:7px;
+cursor:ns-resize;
+flex:0 0 7px;
+touch-action:none;
+position:relative;
+z-index:10
+}
+
+.terminal-resizer:hover{
+background:#ffffff08
 }
 
 .term-head{
@@ -1606,21 +2578,22 @@ padding:7px 9px
 background:#070909!important
 }
 
-.terminal.minimized .term-body{
-display:none
-}
-
 .terminal.minimized{
 height:34px
 }
 
-.terminal.minimized .term-head{
-border-bottom:0
+.terminal.minimized .terminal-resizer,
+.terminal.minimized .term-body{
+display:none
 }
 
 .terminal-body{
 min-height:0;
 flex:1
+}
+
+.terminal.minimized .term-head{
+border-bottom:0
 }
 
 .overlay{
@@ -1677,7 +2650,8 @@ font-size:11px;
 color:var(--muted)
 }
 
-.modal-row input,.modal-row select{
+.modal-row input,
+.modal-row select{
 width:100%;
 height:39px;
 background:var(--bg);
@@ -1687,7 +2661,8 @@ padding:0 11px;
 outline:0
 }
 
-.modal-row input:focus,.modal-row select:focus{
+.modal-row input:focus,
+.modal-row select:focus{
 border-color:var(--accent)
 }
 
@@ -1797,12 +2772,56 @@ z-index:15
 display:block
 }
 
-.loading{
+.setting-toggle{
+display:flex;
+align-items:center;
+justify-content:space-between;
+gap:12px;
+padding:10px 0
+}
+
+.switch{
+position:relative;
+width:44px;
+height:24px;
+flex:0 0 auto
+}
+
+.switch input{
+opacity:0;
+width:0;
+height:0
+}
+
+.slider{
 position:absolute;
-right:15px;
-top:12px;
-font-size:10px;
-color:var(--muted)
+inset:0;
+background:var(--panel2);
+border:1px solid var(--border);
+border-radius:999px;
+cursor:pointer
+}
+
+.slider:before{
+content:'';
+position:absolute;
+width:18px;
+height:18px;
+left:2px;
+top:2px;
+border-radius:50%;
+background:var(--muted);
+transition:.18s
+}
+
+.switch input:checked+.slider{
+background:var(--accent2);
+border-color:var(--accent2)
+}
+
+.switch input:checked+.slider:before{
+transform:translateX(20px);
+background:#fff
 }
 
 @media(max-width:800px){
@@ -1814,10 +2833,6 @@ grid-template-rows:48px 1fr
 .topbar{
 height:48px;
 padding:0 8px
-}
-
-.brand small{
-display:none
 }
 
 .top-btn span{
@@ -1852,6 +2867,10 @@ transform:translateX(0)
 
 .main{
 grid-template-rows:minmax(160px,1fr) var(--term)
+}
+
+.main.terminal-minimized{
+grid-template-rows:minmax(160px,1fr) 34px
 }
 
 .tabs{
@@ -1899,6 +2918,10 @@ border-radius:13px
 grid-template-rows:minmax(145px,1fr) var(--term)
 }
 
+.main.terminal-minimized{
+grid-template-rows:minmax(145px,1fr) 34px
+}
+
 .term-head{
 height:32px
 }
@@ -1922,35 +2945,55 @@ height:24px
 
 <body>
 
+<div id="welcomeScreen">
+<div class="welcome-inner">
+<img class="welcome-logo" src="https://raw.githubusercontent.com/joaoTYSM/VStermu/refs/heads/main/icon.svg">
+<div class="welcome-title">Welcome!</div>
+<div class="welcome-label">VStermu-x</div>
+<div class="stretch-loader">
+<span></span>
+<span></span>
+<span></span>
+</div>
+</div>
+</div>
+
 <div id="app">
 
 <header class="topbar">
 
 <div class="brand">
 <img src="https://raw.githubusercontent.com/joaoTYSM/VStermu/refs/heads/main/icon.svg">
-<span>vstermu</span>
-<small>PRO</small>
-<span class="status-dot" id="statusDot"></span>
+<span>VStermu-x</span>
 </div>
 
 <div class="top-actions">
 
-<button class="icon-btn"
+<button
+class="icon-btn"
 id="menuBtn"
 title="Explorer">
+
 <i class="fa-solid fa-bars"></i>
+
 </button>
 
-<button class="icon-btn"
+<button
+class="icon-btn"
 id="saveBtn"
 title="Save">
+
 <i class="fa-solid fa-floppy-disk"></i>
+
 </button>
 
-<button class="icon-btn"
+<button
+class="icon-btn"
 id="settingsBtn"
 title="Settings">
+
 <i class="fa-solid fa-gear"></i>
+
 </button>
 
 </div>
@@ -1959,7 +3002,9 @@ title="Settings">
 
 <div class="workspace">
 
-<aside class="sidebar" id="sidebar">
+<aside
+class="sidebar"
+id="sidebar">
 
 <div class="sidebar-head">
 
@@ -1973,33 +3018,46 @@ Explorer
 class="small-btn"
 id="newFileBtn"
 title="New file">
+
 <i class="fa-solid fa-file-circle-plus"></i>
+
 </button>
 
 <button
 class="small-btn"
 id="newFolderBtn"
 title="New folder">
+
 <i class="fa-solid fa-folder-plus"></i>
+
 </button>
 
 <button
 class="small-btn"
 id="refreshBtn"
 title="Refresh">
+
 <i class="fa-solid fa-rotate"></i>
+
 </button>
 
 </div>
 
 </div>
 
-<div class="roots" id="roots"></div>
+<div
+class="roots"
+id="roots">
+</div>
 
-<div class="tree" id="tree">
+<div
+class="tree"
+id="tree">
+
 <div class="tree-empty">
 Loading filesystem...
 </div>
+
 </div>
 
 </aside>
@@ -2009,15 +3067,24 @@ class="backdrop"
 id="backdrop">
 </div>
 
-<main class="main">
+<main
+class="main"
+id="mainPanel">
 
 <section class="editor">
 
-<div class="tabs" id="tabs">
+<div
+class="tabs"
+id="tabs">
 
 <div class="tab">
+
 <i class="fa-solid fa-code"></i>
-<span>No file open</span>
+
+<span>
+No file open
+</span>
+
 </div>
 
 <div class="editor-tools">
@@ -2045,7 +3112,9 @@ id="emptyEditor">
 
 <img src="https://raw.githubusercontent.com/joaoTYSM/VStermu/refs/heads/main/icon.svg">
 
-<b>Select a file to edit</b>
+<b>
+Select a file to edit
+</b>
 
 <span>
 Files are loaded only when opened.
@@ -2053,10 +3122,26 @@ Files are loaded only when opened.
 
 </div>
 
+<div
+class="editor-protection hidden"
+id="editorProtection">
+
+<strong>
+Protected file
+</strong>
+
+<br>
+
+<span id="editorProtectionText"></span>
+
+</div>
+
 <span
 class="loading hidden"
 id="editorLoading">
+
 Loading...
+
 </span>
 
 </div>
@@ -2066,6 +3151,11 @@ Loading...
 <section
 class="terminal"
 id="terminalPanel">
+
+<div
+class="terminal-resizer"
+id="terminalResizer">
+</div>
 
 <div class="term-head">
 
@@ -2125,28 +3215,43 @@ class="context"
 id="contextMenu">
 
 <button data-action="open">
+
 <i class="fa-solid fa-pen-to-square"></i>
+
 Open
+
 </button>
 
 <button data-action="rename">
+
 <i class="fa-solid fa-i-cursor"></i>
+
 Rename
+
 </button>
 
 <button data-action="file">
+
 <i class="fa-solid fa-file-circle-plus"></i>
+
 Add file
+
 </button>
 
 <button data-action="folder">
+
 <i class="fa-solid fa-folder-plus"></i>
+
 Add folder
+
 </button>
 
 <button data-action="terminal">
+
 <i class="fa-solid fa-terminal"></i>
+
 Open terminal here
+
 </button>
 
 <hr>
@@ -2156,6 +3261,7 @@ data-action="delete"
 class="danger">
 
 <i class="fa-solid fa-trash"></i>
+
 Delete
 
 </button>
@@ -2173,7 +3279,9 @@ id="modalOverlay">
 <span
 class="modal-title"
 id="modalTitle">
+
 Action
+
 </span>
 
 <button
@@ -2196,13 +3304,17 @@ id="modalBody">
 <button
 class="btn"
 id="modalCancel">
+
 Cancel
+
 </button>
 
 <button
 class="btn primary"
 id="modalConfirm">
+
 Confirm
+
 </button>
 
 </div>
@@ -2217,25 +3329,18 @@ id="toast">
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.20/codemirror.min.js"></script>
-
 <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.20/mode/javascript/javascript.min.js"></script>
-
 <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.20/mode/xml/xml.min.js"></script>
-
 <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.20/mode/css/css.min.js"></script>
-
 <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.20/mode/htmlmixed/htmlmixed.min.js"></script>
-
 <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.20/mode/python/python.min.js"></script>
-
 <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.20/mode/shell/shell.min.js"></script>
-
 <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.20/mode/markdown/markdown.min.js"></script>
-
 <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.20/mode/clike/clike.min.js"></script>
-
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.20/addon/hint/show-hint.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.20/addon/hint/javascript-hint.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.20/addon/lint/lint.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
-
 <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
 
 <script>
@@ -2283,13 +3388,31 @@ let currentFile=null;
 
 let currentParent=null;
 
+let currentFileProtected=false;
+
+let currentFileNotice='';
+
 let saveTimer=null;
+
+let lintTimer=null;
 
 let longTimer=null;
 
 let longTriggered=false;
 
 let modalAction=null;
+
+let envEnabled=false;
+
+let terminalInputBuffer='';
+
+let ws=null;
+
+let reconnectTimer=null;
+
+let resizeTimer=null;
+
+let terminalDragging=false;
 
 const editor=CodeMirror.fromTextArea(
 $('editor'),
@@ -2302,7 +3425,10 @@ tabSize:4,
 lineWrapping:true,
 viewportMargin:40,
 matchBrackets:true,
-autoCloseBrackets:true
+autoCloseBrackets:true,
+lint:{
+getAnnotations:()=>[]
+}
 }
 );
 
@@ -2332,35 +3458,980 @@ term.open(
 $('terminalBody')
 );
 
+const COMPLETIONS={
+
+python:[
+'and',
+'as',
+'assert',
+'async',
+'await',
+'break',
+'case',
+'class',
+'continue',
+'def',
+'del',
+'elif',
+'else',
+'except',
+'False',
+'finally',
+'for',
+'from',
+'global',
+'if',
+'import',
+'in',
+'is',
+'lambda',
+'match',
+'None',
+'nonlocal',
+'not',
+'or',
+'pass',
+'raise',
+'return',
+'True',
+'try',
+'while',
+'with',
+'yield',
+'self',
+'print',
+'str',
+'int',
+'float',
+'bool',
+'bytes',
+'dict',
+'list',
+'set',
+'tuple',
+'range',
+'len',
+'open',
+'Exception',
+'ValueError',
+'TypeError',
+'RuntimeError',
+'object',
+'super',
+'property',
+'staticmethod',
+'classmethod',
+'enumerate',
+'zip',
+'map',
+'filter',
+'sorted',
+'reversed',
+'any',
+'all',
+'min',
+'max',
+'sum',
+'abs',
+'round',
+'isinstance',
+'issubclass',
+'getattr',
+'setattr',
+'hasattr',
+'vars',
+'dir',
+'help',
+'__name__',
+'__file__'
+],
+
+javascript:[
+'const',
+'let',
+'var',
+'function',
+'return',
+'class',
+'extends',
+'new',
+'this',
+'super',
+'if',
+'else',
+'for',
+'while',
+'do',
+'switch',
+'case',
+'break',
+'continue',
+'try',
+'catch',
+'finally',
+'throw',
+'async',
+'await',
+'import',
+'export',
+'default',
+'from',
+'typeof',
+'instanceof',
+'in',
+'of',
+'delete',
+'void',
+'yield',
+'true',
+'false',
+'null',
+'undefined',
+'Object',
+'Array',
+'String',
+'Number',
+'Boolean',
+'RegExp',
+'Date',
+'Math',
+'JSON',
+'Promise',
+'Map',
+'Set',
+'WeakMap',
+'WeakSet',
+'Symbol',
+'Error',
+'console',
+'window',
+'document',
+'globalThis',
+'setTimeout',
+'setInterval',
+'clearTimeout',
+'clearInterval',
+'fetch'
+],
+
+html:[
+'html',
+'head',
+'body',
+'title',
+'meta',
+'link',
+'style',
+'script',
+'div',
+'span',
+'main',
+'section',
+'header',
+'footer',
+'nav',
+'button',
+'input',
+'textarea',
+'select',
+'option',
+'form',
+'label',
+'img',
+'a',
+'ul',
+'ol',
+'li',
+'table',
+'thead',
+'tbody',
+'tr',
+'td',
+'th',
+'video',
+'audio',
+'canvas',
+'svg',
+'path'
+],
+
+css:[
+'display',
+'position',
+'absolute',
+'relative',
+'fixed',
+'sticky',
+'grid',
+'flex',
+'block',
+'inline',
+'inline-block',
+'width',
+'height',
+'min-width',
+'max-width',
+'min-height',
+'max-height',
+'margin',
+'padding',
+'border',
+'border-radius',
+'background',
+'color',
+'font-size',
+'font-family',
+'font-weight',
+'line-height',
+'opacity',
+'transform',
+'transition',
+'animation',
+'box-shadow',
+'overflow',
+'cursor',
+'z-index',
+'top',
+'right',
+'bottom',
+'left',
+'gap',
+'justify-content',
+'align-items',
+'align-self',
+'grid-template-columns',
+'grid-template-rows',
+'media',
+'var',
+'calc'
+],
+
+shell:[
+'cd',
+'pwd',
+'ls',
+'mkdir',
+'rm',
+'cp',
+'mv',
+'touch',
+'cat',
+'echo',
+'printf',
+'grep',
+'find',
+'sed',
+'awk',
+'head',
+'tail',
+'less',
+'nano',
+'vim',
+'git',
+'python',
+'python3',
+'node',
+'npm',
+'npx',
+'pip',
+'pip3',
+'bash',
+'sh',
+'zsh',
+'chmod',
+'clear',
+'exit',
+'export',
+'source',
+'env',
+'which',
+'whoami',
+'uname',
+'curl',
+'wget'
+],
+
+java:[
+'class',
+'interface',
+'enum',
+'extends',
+'implements',
+'public',
+'private',
+'protected',
+'static',
+'final',
+'void',
+'int',
+'long',
+'double',
+'float',
+'boolean',
+'char',
+'new',
+'return',
+'if',
+'else',
+'for',
+'while',
+'try',
+'catch',
+'finally',
+'throw',
+'throws',
+'package',
+'import',
+'this',
+'super',
+'null',
+'true',
+'false',
+'String',
+'System',
+'Math',
+'Object',
+'List',
+'Map',
+'Set',
+'ArrayList',
+'HashMap'
+],
+
+c:[
+'auto',
+'break',
+'case',
+'char',
+'const',
+'continue',
+'default',
+'do',
+'double',
+'else',
+'enum',
+'extern',
+'float',
+'for',
+'goto',
+'if',
+'inline',
+'int',
+'long',
+'register',
+'restrict',
+'return',
+'short',
+'signed',
+'sizeof',
+'static',
+'struct',
+'switch',
+'typedef',
+'union',
+'unsigned',
+'void',
+'volatile',
+'while',
+'NULL',
+'printf',
+'scanf',
+'malloc',
+'calloc',
+'realloc',
+'free',
+'memcpy',
+'strlen'
+],
+
+cpp:[
+'auto',
+'bool',
+'break',
+'case',
+'catch',
+'char',
+'class',
+'const',
+'constexpr',
+'continue',
+'default',
+'delete',
+'do',
+'double',
+'else',
+'enum',
+'explicit',
+'extern',
+'false',
+'float',
+'for',
+'friend',
+'if',
+'inline',
+'int',
+'long',
+'namespace',
+'new',
+'noexcept',
+'nullptr',
+'operator',
+'private',
+'protected',
+'public',
+'return',
+'short',
+'signed',
+'sizeof',
+'static',
+'struct',
+'switch',
+'template',
+'this',
+'throw',
+'true',
+'try',
+'typedef',
+'typename',
+'union',
+'unsigned',
+'using',
+'virtual',
+'void',
+'volatile',
+'while',
+'std',
+'string',
+'vector',
+'map',
+'set',
+'unordered_map',
+'optional',
+'variant',
+'unique_ptr',
+'shared_ptr'
+],
+
+rust:[
+'fn',
+'let',
+'mut',
+'pub',
+'struct',
+'enum',
+'impl',
+'trait',
+'match',
+'if',
+'else',
+'loop',
+'while',
+'for',
+'in',
+'return',
+'use',
+'mod',
+'crate',
+'self',
+'Self',
+'move',
+'async',
+'await',
+'dyn',
+'where',
+'const',
+'static',
+'type',
+'as',
+'ref',
+'true',
+'false',
+'Option',
+'Result',
+'String',
+'Vec',
+'HashMap',
+'HashSet',
+'Box',
+'Rc',
+'Arc',
+'println',
+'format',
+'panic'
+],
+
+go:[
+'package',
+'import',
+'func',
+'var',
+'const',
+'type',
+'struct',
+'interface',
+'map',
+'chan',
+'go',
+'defer',
+'select',
+'case',
+'default',
+'if',
+'else',
+'for',
+'range',
+'switch',
+'return',
+'break',
+'continue',
+'fallthrough',
+'nil',
+'true',
+'false',
+'string',
+'int',
+'int64',
+'float64',
+'bool',
+'byte',
+'rune',
+'error',
+'fmt',
+'context',
+'time',
+'os',
+'io',
+'http'
+],
+
+sql:[
+'SELECT',
+'FROM',
+'WHERE',
+'INSERT',
+'INTO',
+'VALUES',
+'UPDATE',
+'SET',
+'DELETE',
+'CREATE',
+'ALTER',
+'DROP',
+'TABLE',
+'DATABASE',
+'INDEX',
+'JOIN',
+'LEFT',
+'RIGHT',
+'INNER',
+'OUTER',
+'FULL',
+'ON',
+'GROUP',
+'BY',
+'ORDER',
+'HAVING',
+'LIMIT',
+'OFFSET',
+'AS',
+'AND',
+'OR',
+'NOT',
+'NULL',
+'IS',
+'IN',
+'LIKE',
+'BETWEEN',
+'UNION',
+'ALL',
+'DISTINCT',
+'COUNT',
+'SUM',
+'AVG',
+'MIN',
+'MAX',
+'CASE',
+'WHEN',
+'THEN',
+'ELSE',
+'END'
+],
+
+json:[
+'true',
+'false',
+'null'
+]
+
+};
+
+const LIBRARY_COMPLETIONS={
+
+'discord.py':[
+'discord',
+'discord.Client',
+'discord.Bot',
+'discord.AutoShardedClient',
+'discord.Intents',
+'discord.Message',
+'discord.User',
+'discord.Member',
+'discord.Guild',
+'discord.Channel',
+'discord.TextChannel',
+'discord.VoiceChannel',
+'discord.Thread',
+'discord.Embed',
+'discord.File',
+'discord.SelectOption',
+'discord.ui',
+'discord.ui.View',
+'discord.ui.Modal',
+'discord.ui.Button',
+'discord.ui.Select',
+'discord.Interaction',
+'discord.app_commands',
+'discord.ext',
+'discord.ext.commands',
+'commands.Bot',
+'commands.Cog',
+'commands.Context',
+'commands.command',
+'commands.hybrid_command',
+'commands.hybrid_group',
+'app_commands.command',
+'app_commands.describe',
+'app_commands.choices',
+'app_commands.Group',
+'tasks.loop',
+'commands.Bot.tree',
+'bot.tree.sync',
+'bot.add_cog',
+'bot.run',
+'message.author',
+'message.channel',
+'message.guild',
+'message.content',
+'interaction.response.send_message',
+'interaction.followup.send',
+'interaction.user',
+'guild.members',
+'guild.channels'
+],
+
+'discord.js':[
+'Client',
+'GatewayIntentBits',
+'Partials',
+'Collection',
+'REST',
+'Routes',
+'Events',
+'EmbedBuilder',
+'AttachmentBuilder',
+'ButtonBuilder',
+'ButtonStyle',
+'ActionRowBuilder',
+'StringSelectMenuBuilder',
+'ModalBuilder',
+'TextInputBuilder',
+'TextInputStyle',
+'SlashCommandBuilder',
+'PermissionFlagsBits',
+'ChannelType',
+'PermissionsBitField',
+'Guild',
+'GuildMember',
+'Message',
+'ChatInputCommandInteraction',
+'ClientReady',
+'Events.ClientReady',
+'client.login',
+'client.channels.fetch',
+'interaction.reply',
+'interaction.followUp',
+'interaction.deferReply',
+'message.reply',
+'guild.members.fetch',
+'guild.channels.fetch'
+],
+
+'flask':[
+'Flask',
+'request',
+'jsonify',
+'Response',
+'render_template',
+'send_file',
+'redirect',
+'url_for',
+'session',
+'make_response',
+'abort',
+'Blueprint'
+],
+
+'fastapi':[
+'FastAPI',
+'Request',
+'Response',
+'HTTPException',
+'Depends',
+'Query',
+'Path',
+'Body',
+'Header',
+'Cookie',
+'File',
+'UploadFile',
+'WebSocket',
+'WebSocketDisconnect',
+'BackgroundTasks'
+],
+
+'requests':[
+'requests.get',
+'requests.post',
+'requests.put',
+'requests.patch',
+'requests.delete',
+'requests.Session',
+'requests.headers',
+'requests.Timeout',
+'requests.exceptions.RequestException'
+],
+
+'aiohttp':[
+'aiohttp.ClientSession',
+'aiohttp.ClientTimeout',
+'aiohttp.ClientResponse',
+'aiohttp.web',
+'web.Application',
+'web.get',
+'web.post',
+'ClientConnectorError'
+],
+
+'asyncio':[
+'asyncio.run',
+'asyncio.create_task',
+'asyncio.gather',
+'asyncio.sleep',
+'asyncio.wait',
+'asyncio.Event',
+'asyncio.Lock',
+'asyncio.Queue',
+'asyncio.Semaphore'
+],
+
+'os':[
+'os.environ',
+'os.getenv',
+'os.getcwd',
+'os.chdir',
+'os.path',
+'os.path.join',
+'os.path.exists',
+'os.makedirs',
+'os.remove',
+'os.rename',
+'os.scandir',
+'os.system',
+'os.execvpe'
+],
+
+'pathlib':[
+'Path',
+'Path.exists',
+'Path.read_text',
+'Path.write_text',
+'Path.iterdir',
+'Path.glob',
+'Path.mkdir',
+'Path.unlink',
+'PurePath'
+],
+
+'json':[
+'json.dumps',
+'json.loads',
+'json.dump',
+'json.load',
+'json.JSONDecodeError'
+],
+
+'shutil':[
+'shutil.copy',
+'shutil.copytree',
+'shutil.move',
+'shutil.rmtree',
+'shutil.which'
+],
+
+'subprocess':[
+'subprocess.run',
+'subprocess.Popen',
+'subprocess.PIPE',
+'subprocess.STDOUT',
+'subprocess.TimeoutExpired'
+],
+
+'node':[
+'require',
+'module',
+'exports',
+'process',
+'Buffer',
+'URL',
+'console'
+],
+
+'node:fs':[
+'fs.readFile',
+'fs.readFileSync',
+'fs.writeFile',
+'fs.writeFileSync',
+'fs.mkdir',
+'fs.rm',
+'fs.rename',
+'fs.readdir',
+'fs.stat',
+'fs.createReadStream',
+'fs.createWriteStream'
+],
+
+'node:path':[
+'path.join',
+'path.resolve',
+'path.dirname',
+'path.basename',
+'path.extname',
+'path.parse',
+'path.normalize',
+'path.relative'
+],
+
+'node:http':[
+'http.createServer',
+'http.request',
+'http.get',
+'http.ServerResponse',
+'http.IncomingMessage'
+],
+
+'express':[
+'express',
+'express.Router',
+'app.use',
+'app.get',
+'app.post',
+'app.put',
+'app.patch',
+'app.delete',
+'app.listen',
+'res.json',
+'res.send',
+'res.status',
+'req.params',
+'req.query',
+'req.body'
+],
+
+'react':[
+'React',
+'useState',
+'useEffect',
+'useMemo',
+'useCallback',
+'useRef',
+'useContext',
+'useReducer',
+'useLayoutEffect',
+'createContext',
+'createElement',
+'memo',
+'forwardRef',
+'Fragment'
+],
+
+'vue':[
+'createApp',
+'ref',
+'reactive',
+'computed',
+'watch',
+'watchEffect',
+'onMounted',
+'onUnmounted',
+'defineComponent',
+'nextTick'
+],
+
+'numpy':[
+'np.array',
+'np.asarray',
+'np.zeros',
+'np.ones',
+'np.arange',
+'np.linspace',
+'np.reshape',
+'np.concatenate',
+'np.stack',
+'np.mean',
+'np.sum',
+'np.max',
+'np.min',
+'np.random'
+],
+
+'pandas':[
+'pd.DataFrame',
+'pd.Series',
+'pd.read_csv',
+'pd.read_json',
+'pd.read_excel',
+'df.head',
+'df.tail',
+'df.describe',
+'df.loc',
+'df.iloc',
+'df.merge',
+'df.groupby',
+'df.sort_values'
+],
+
+'tkinter':[
+'tk.Tk',
+'tk.Frame',
+'tk.Label',
+'tk.Button',
+'tk.Entry',
+'tk.Text',
+'tk.Listbox',
+'tk.Canvas',
+'tk.StringVar',
+'tk.IntVar',
+'tk.messagebox',
+'tk.filedialog'
+]
+
+};
+
 function toast(message){
-
 $('toast').textContent=message;
-
-$('toast').classList.add(
-'show'
-);
-
-clearTimeout(
-window.toastTimer
-);
-
+$('toast').classList.add('show');
+clearTimeout(window.toastTimer);
 window.toastTimer=setTimeout(
-()=>$('toast').classList.remove(
-'show'
-),
-2200
+()=>$('toast').classList.remove('show'),
+2600
 );
-
 }
 
 function icon(name){
-
 return `<i class="${name}"></i>`;
-
 }
 
 function escapeHtml(s){
-
 return String(s).replace(
 /[&<>'"]/g,
 c=>({
@@ -2371,11 +4442,9 @@ c=>({
 '"':'&quot;'
 }[c])
 );
-
 }
 
 function formatSize(n){
-
 if(n<1024)
 return n+' B';
 
@@ -2383,7 +4452,6 @@ if(n<1048576)
 return (n/1024).toFixed(1)+' KB';
 
 return (n/1048576).toFixed(1)+' MB';
-
 }
 
 function modeFor(path){
@@ -2424,6 +4492,42 @@ rs:'text/x-rust',
 go:'text/x-go'
 }[e]||'text/plain');
 
+}
+
+function languageKey(path){
+
+const e=
+path.split('.')
+.pop()
+.toLowerCase();
+
+if([
+'js',
+'mjs',
+'cjs',
+'ts',
+'jsx',
+'tsx'
+].includes(e))
+return 'javascript';
+
+if([
+'html',
+'htm',
+'xml',
+'svg'
+].includes(e))
+return 'html';
+
+if([
+'css',
+'scss',
+'sass',
+'less'
+].includes(e))
+return 'css';
+
+return e;
 }
 
 function themeMode(){
@@ -2482,6 +4586,16 @@ style=await api(
 );
 
 applyStyle();
+
+}
+
+async function loadEnvStatus(){
+
+const d=await api(
+'/api/env/status'
+);
+
+envEnabled=!!d.enabled;
 
 }
 
@@ -2606,7 +4720,10 @@ escapeHtml(e.message)
 
 }
 
-async function buildDir(path,depth){
+async function buildDir(
+path,
+depth
+){
 
 let d;
 
@@ -2646,10 +4763,15 @@ openDirs.has(
 item.path
 );
 
+const envClass=
+item.protected
+?' env-protected'
+:'';
+
 html+=
 `
 <div
-class="tree-row ${isDir?'dir':''} ${selectedPath===item.path?'selected':''}"
+class="tree-row ${isDir?'dir':''}${envClass} ${selectedPath===item.path?'selected':''}"
 data-path="${encodeURIComponent(item.path)}"
 data-type="${item.type}"
 style="padding-left:${pad}px">
@@ -2826,11 +4948,25 @@ $('emptyEditor')
 'hidden'
 );
 
+$('editorProtection')
+.classList.add(
+'hidden'
+);
+
+editor.setOption(
+'readOnly',
+false
+);
+
+currentFileProtected=
+false;
+
 try{
 
 const d=
 await api(
-'/api/read?path='+
+'/api/read?path='
++
 encodeURIComponent(path)
 );
 
@@ -2840,11 +4976,26 @@ currentParent=
 path.substring(
 0,
 path.lastIndexOf('/')
-)||'/';
+)
+||
+'/';
+
+currentFileProtected=
+!!d.protected;
+
+currentFileNotice=
+d.notice||'';
 
 editor.setOption(
 'mode',
 modeFor(path)
+);
+
+editor.setOption(
+'readOnly',
+currentFileProtected
+?'nocursor'
+:false
 );
 
 editor.setValue(
@@ -2856,9 +5007,21 @@ editor.clearHistory();
 $('tabs').innerHTML=
 `
 <div class="tab active">
+
 ${icon(fileIconClient(path))}
-<span>${escapeHtml(path.split('/').pop())}</span>
-<span class="tab-close" id="closeFile">×</span>
+
+<span>
+${escapeHtml(path.split('/').pop())}
+</span>
+
+<span
+class="tab-close"
+id="closeFile">
+
+×
+
+</span>
+
 </div>
 
 <div class="editor-tools">
@@ -2881,9 +5044,30 @@ closeFile;
 $('fileConfigBtn').onclick=
 fileSettings;
 
+if(currentFileProtected){
+
+$('editorProtectionText')
+.textContent=
+currentFileNotice
+||
+'This file is protected.';
+
+$('editorProtection')
+.classList.remove(
+'hidden'
+);
+
+toast(
+'The .env values are protected'
+);
+
+}
+
 editor.focus();
 
 saveState();
+
+scheduleLint();
 
 toast(
 'Loaded '
@@ -2916,7 +5100,8 @@ path.split('/')
 .toLowerCase();
 
 if(
-e==='.env'||
+e==='.env'
+||
 e.startsWith('.env.')
 )
 return 'fa-solid fa-gears';
@@ -2948,6 +5133,18 @@ function closeFile(){
 
 currentFile=null;
 
+currentFileProtected=false;
+
+$('editorProtection')
+.classList.add(
+'hidden'
+);
+
+editor.setOption(
+'readOnly',
+false
+);
+
 editor.setValue('');
 
 $('emptyEditor')
@@ -2958,8 +5155,13 @@ $('emptyEditor')
 $('tabs').innerHTML=
 `
 <div class="tab">
+
 ${icon('fa-solid fa-code')}
-<span>No file open</span>
+
+<span>
+No file open
+</span>
+
 </div>
 
 <div class="editor-tools">
@@ -2984,6 +5186,16 @@ function saveFile(){
 
 if(!currentFile)
 return;
+
+if(currentFileProtected){
+
+toast(
+'Protected .env values cannot be written while protection is active'
+);
+
+return;
+
+}
 
 api(
 '/api/write',
@@ -3014,7 +5226,11 @@ editor.on(
 'change',
 ()=>{
 
-if(!currentFile)
+if(
+!currentFile
+||
+currentFileProtected
+)
 return;
 
 clearTimeout(
@@ -3026,6 +5242,10 @@ setTimeout(
 saveFile,
 650
 );
+
+scheduleLint();
+
+scheduleAutocomplete();
 
 }
 );
@@ -3045,7 +5265,8 @@ currentFile
 ?[currentFile]
 :[],
 lastFile:
-currentFile
+currentFile,
+envEnabled
 }
 )
 }
@@ -3055,7 +5276,10 @@ currentFile
 
 }
 
-function showContext(x,y){
+function showContext(
+x,
+y
+){
 
 const menu=
 $('contextMenu');
@@ -3074,13 +5298,17 @@ menu.style.left=
 Math.min(
 x,
 innerWidth-w-8
-)+'px';
+)
++
+'px';
 
 menu.style.top=
 Math.min(
 y,
 innerHeight-h-8
-)+'px';
+)
++
+'px';
 
 menu
 .querySelectorAll(
@@ -3166,6 +5394,7 @@ selectedPath
 );
 
 }
+
 else if(a==='rename')
 renameSelected();
 
@@ -3201,7 +5430,9 @@ selectedPath.lastIndexOf('/')
 HOME
 );
 
-return currentRoot?.path||HOME;
+return currentRoot?.path
+||
+HOME;
 
 }
 
@@ -3372,7 +5603,10 @@ name
 if(
 currentFile===oldPath
 ){
-currentFile=d.path;
+
+currentFile=
+d.path;
+
 }
 
 selectedPath=
@@ -3382,7 +5616,9 @@ await renderTree();
 
 closeModal();
 
-toast('Renamed');
+toast(
+'Renamed'
+);
 
 }
 );
@@ -3397,8 +5633,10 @@ setTimeout(
 function deleteSelected(){
 
 if(
-!selectedPath||
-selectedPath===currentRoot?.path
+!selectedPath
+||
+selectedPath===
+currentRoot?.path
 )
 return;
 
@@ -3406,7 +5644,8 @@ openModal(
 'Delete',
 
 `
-<div style="color:var(--danger);font-size:13px;line-height:1.5">
+<div
+style="color:var(--danger);font-size:13px;line-height:1.5">
 
 Delete
 <b>
@@ -3435,7 +5674,8 @@ path:selectedPath
 );
 
 if(
-currentFile===selectedPath
+currentFile===
+selectedPath
 )
 closeFile();
 
@@ -3446,7 +5686,9 @@ await renderTree();
 
 closeModal();
 
-toast('Deleted');
+toast(
+'Deleted'
+);
 
 },
 true
@@ -3492,12 +5734,7 @@ path
 }
 );
 
-$('terminalPanel')
-.classList.remove(
-'minimized'
-);
-
-fitTerminal();
+restoreTerminal();
 
 toast(
 'Terminal changed to '+path
@@ -3512,13 +5749,16 @@ action,
 danger=false
 ){
 
-modalAction=action;
+modalAction=
+action;
 
 $('modalTitle')
-.textContent=title;
+.textContent=
+title;
 
 $('modalBody')
-.innerHTML=body;
+.innerHTML=
+body;
 
 $('modalConfirm')
 .textContent=
@@ -3639,36 +5879,6 @@ $('backdrop')
 $('clearTermBtn').onclick=
 ()=>term.clear();
 
-$('minTermBtn').onclick=
-()=>{
-
-$('terminalPanel')
-.classList.toggle(
-'minimized'
-);
-
-$('minTermBtn')
-.innerHTML=
-$('terminalPanel')
-.classList.contains(
-'minimized'
-)
-?
-icon(
-'fa-solid fa-chevron-up'
-)
-:
-icon(
-'fa-solid fa-chevron-down'
-);
-
-setTimeout(
-fitTerminal,
-80
-);
-
-};
-
 function openSettings(){
 
 openModal(
@@ -3778,6 +5988,35 @@ Disabled
 </select>
 
 </div>
+
+<div class="setting-toggle">
+
+<div>
+
+<strong>
+Show .env values
+</strong>
+
+<div
+style="font-size:11px;color:var(--muted);margin-top:4px">
+
+Disabled by default. Turning this off protects all .env values again.
+
+</div>
+
+</div>
+
+<label class="switch">
+
+<input
+id="setEnv"
+type="checkbox">
+
+<span class="slider"></span>
+
+</label>
+
+</div>
 `,
 
 async()=>{
@@ -3800,15 +6039,64 @@ style.sidebarWidth=
 style.wordWrap=
 $('setWrap').value==='true';
 
+const requestedEnv=
+$('setEnv').checked;
+
+if(
+requestedEnv!==envEnabled
+){
+
+if(
+requestedEnv
+&&
+!confirm(
+'Show .env values in the editor?'
+)
+){
+
+return;
+
+}
+
+await api(
+'/api/env/set',
+{
+method:'POST',
+body:JSON.stringify(
+{
+enabled:requestedEnv
+}
+)
+}
+);
+
+envEnabled=
+requestedEnv;
+
+}
+
 await api(
 '/api/style',
 {
 method:'PUT',
-body:JSON.stringify(style)
+body:JSON.stringify(
+style
+)
 }
 );
 
 applyStyle();
+
+closeModal();
+
+if(
+currentFile
+&&
+isEnvClient(currentFile)
+)
+await openFile(
+currentFile
+);
 
 closeModal();
 
@@ -3827,19 +6115,1278 @@ String(
 style.wordWrap!==false
 );
 
+$('setEnv').checked=
+envEnabled;
+
 }
 
 $('settingsBtn').onclick=
 openSettings;
 
-let ws=null;
+function isEnvClient(path){
 
-let reconnectTimer=null;
+const name=
+String(path)
+.split('/')
+.pop()
+.toLowerCase();
+
+return (
+name==='.env'
+||
+name.startsWith('.env.')
+);
+
+}
+
+function terminalCommand(
+line
+){
+
+const command=
+line.trim();
+
+if(
+command===
+'.env enable'
+){
+
+if(envEnabled){
+
+term.writeln(
+'\r\n.env values are already enabled.'
+);
+
+return true;
+
+}
+
+sendWS(
+{
+type:'input',
+data:'\u0003'
+}
+);
+
+openModal(
+'Enable .env values',
+
+`
+<div
+style="font-size:13px;line-height:1.5">
+
+This will allow VStermu-x to display .env values in the editor. The setting can be disabled again from Settings.
+
+</div>
+`,
+
+async()=>{
+
+await api(
+'/api/env/set',
+{
+method:'POST',
+body:JSON.stringify(
+{
+enabled:true
+}
+)
+}
+);
+
+envEnabled=true;
+
+closeModal();
+
+term.writeln(
+'\r\n.env values enabled. Reloading VStermu-x...'
+);
+
+setTimeout(
+()=>location.href=
+location.pathname
++
+'?env=enabled',
+250
+);
+
+}
+);
+
+return true;
+
+}
+
+if(
+command===
+'.env unenable'
+){
+
+sendWS(
+{
+type:'input',
+data:'\u0003'
+}
+);
+
+api(
+'/api/env/set',
+{
+method:'POST',
+body:JSON.stringify(
+{
+enabled:false
+}
+)
+}
+)
+.then(
+()=>{
+
+envEnabled=false;
+
+term.writeln(
+'\r\n.env values disabled.'
+);
+
+setTimeout(
+()=>location.href=
+location.pathname
++
+'?env=disabled',
+250
+);
+
+}
+)
+.catch(
+e=>toast(
+e.message
+)
+);
+
+return true;
+
+}
+
+if(
+command===
+'.env status'
+){
+
+sendWS(
+{
+type:'input',
+data:'\u0003'
+}
+);
+
+term.writeln(
+'\r\n.env protection: '
++
+(
+envEnabled
+?'enabled'
+:'disabled'
+)
+);
+
+return true;
+
+}
+
+if(
+command===
+'.vstermu help'
+){
+
+sendWS(
+{
+type:'input',
+data:'\u0003'
+}
+);
+
+term.writeln(
+'\r\nVStermu-x commands'
+);
+
+term.writeln(
+'.env enable     Enable .env values after confirmation'
+);
+
+term.writeln(
+'.env unenable   Disable .env values'
+);
+
+term.writeln(
+'.env status     Show .env protection status'
+);
+
+term.writeln(
+'.vstermu help   Show this command list'
+);
+
+term.writeln(
+'.vstermu clear  Clear the terminal'
+);
+
+term.writeln(
+'.vstermu reload Reload the editor'
+);
+
+term.writeln(
+'.vstermu settings Open Settings'
+);
+
+term.writeln(
+'.vstermu explorer Open Explorer'
+);
+
+return true;
+
+}
+
+if(
+command===
+'.vstermu clear'
+){
+
+sendWS(
+{
+type:'input',
+data:'\u0003'
+}
+);
+
+term.clear();
+
+return true;
+
+}
+
+if(
+command===
+'.vstermu reload'
+){
+
+sendWS(
+{
+type:'input',
+data:'\u0003'
+}
+);
+
+location.reload();
+
+return true;
+
+}
+
+if(
+command===
+'.vstermu settings'
+){
+
+sendWS(
+{
+type:'input',
+data:'\u0003'
+}
+);
+
+openSettings();
+
+return true;
+
+}
+
+if(
+command===
+'.vstermu explorer'
+){
+
+sendWS(
+{
+type:'input',
+data:'\u0003'
+}
+);
+
+$('sidebar')
+.classList.add(
+'open'
+);
+
+$('backdrop')
+.classList.add(
+'show'
+);
+
+return true;
+
+}
+
+return false;
+
+}
+
+function handleTerminalInput(
+data
+){
+
+if(!data)
+return false;
+
+if(
+data.includes('\r')
+||
+data.includes('\n')
+){
+
+const parts=
+data
+.replace(
+/\r\n/g,
+'\n'
+)
+.replace(
+/\r/g,
+'\n'
+)
+.split('\n');
+
+let first=
+parts.shift();
+
+if(
+parts.length
+||
+data.endsWith('\n')
+){
+
+terminalInputBuffer+=
+first;
+
+const custom=
+terminalCommand(
+terminalInputBuffer
+);
+
+terminalInputBuffer='';
+
+if(custom){
+
+if(parts.length){
+
+const rest=
+parts.join('\n');
+
+if(rest)
+sendWS(
+{
+type:'input',
+data:rest
+}
+);
+
+}
+
+return true;
+
+}
+
+return false;
+
+}
+
+terminalInputBuffer+=
+first;
+
+return false;
+
+}
+
+if(
+data==='\x7f'
+||
+data==='\b'
+){
+
+terminalInputBuffer=
+terminalInputBuffer.slice(
+0,
+-1
+);
+
+return false;
+
+}
+
+if(
+data==='\x03'
+||
+data==='\x04'
+){
+
+terminalInputBuffer='';
+
+return false;
+
+}
+
+if(
+data.startsWith('\x1b')
+){
+
+terminalInputBuffer='';
+
+return false;
+
+}
+
+if(
+data==='\t'
+){
+
+terminalInputBuffer='';
+
+return false;
+
+}
+
+if(
+/^[\x20-\x7e]+$/.test(
+data
+)
+){
+
+terminalInputBuffer+=
+data;
+
+if(
+terminalInputBuffer.length>512
+)
+terminalInputBuffer=
+terminalInputBuffer.slice(
+-512
+);
+
+}
+
+return false;
+
+}
+
+term.onData(
+data=>{
+if(
+handleTerminalInput(data)
+)
+return;
+
+sendWS(
+{
+type:'input',
+data
+}
+);
+}
+);
+
+term.onResize(
+size=>
+sendWS(
+{
+type:'resize',
+cols:size.cols,
+rows:size.rows
+}
+)
+);
+
+function fitTerminal(){
+
+if(
+$('terminalPanel')
+.classList.contains(
+'minimized'
+)
+)
+return;
+
+try{
+
+fitAddon.fit();
+
+sendWS(
+{
+type:'resize',
+cols:term.cols,
+rows:term.rows
+}
+);
+
+}catch(e){}
+
+}
+
+function restoreTerminal(){
+
+$('terminalPanel')
+.classList.remove(
+'minimized'
+);
+
+$('mainPanel')
+.classList.remove(
+'terminal-minimized'
+);
+
+$('minTermBtn').innerHTML=
+icon(
+'fa-solid fa-chevron-down'
+);
+
+setTimeout(
+fitTerminal,
+80
+);
+
+}
+
+function minimizeTerminal(){
+
+$('terminalPanel')
+.classList.add(
+'minimized'
+);
+
+$('mainPanel')
+.classList.add(
+'terminal-minimized'
+);
+
+$('minTermBtn').innerHTML=
+icon(
+'fa-solid fa-chevron-up'
+);
+
+setTimeout(
+()=>{
+try{
+fitAddon.fit();
+}catch(e){}
+},
+80
+);
+
+}
+
+$('minTermBtn').onclick=
+()=>{
+
+$('terminalPanel')
+.classList.contains(
+'minimized'
+)
+?
+restoreTerminal()
+:
+minimizeTerminal();
+
+};
+
+function updateTerminalHeight(
+clientY
+){
+
+const rect=
+$('mainPanel')
+.getBoundingClientRect();
+
+const max=
+Math.min(
+700,
+Math.max(
+160,
+rect.height-145
+)
+);
+
+const value=
+Math.max(
+120,
+Math.min(
+max,
+rect.bottom-clientY
+)
+);
+
+document.documentElement.style.setProperty(
+'--term',
+value+'px'
+);
+
+style.terminalHeight=
+Math.round(value);
+
+clearTimeout(
+resizeTimer
+);
+
+resizeTimer=
+setTimeout(
+()=>{
+api(
+'/api/style',
+{
+method:'PUT',
+body:JSON.stringify(
+{
+terminalHeight:
+style.terminalHeight
+}
+)
+}
+)
+.catch(
+()=>{}
+);
+
+fitTerminal();
+
+},
+90
+);
+
+}
+
+$('terminalResizer')
+.addEventListener(
+'pointerdown',
+e=>{
+
+if(
+$('terminalPanel')
+.classList.contains(
+'minimized'
+)
+)
+return;
+
+terminalDragging=true;
+
+$('terminalResizer')
+.setPointerCapture?.(
+e.pointerId
+);
+
+document.body.style.userSelect=
+'none';
+
+}
+);
+
+window.addEventListener(
+'pointermove',
+e=>{
+
+if(!terminalDragging)
+return;
+
+updateTerminalHeight(
+e.clientY
+);
+
+}
+);
+
+window.addEventListener(
+'pointerup',
+()=>{
+
+if(!terminalDragging)
+return;
+
+terminalDragging=false;
+
+document.body.style.userSelect='';
+
+fitTerminal();
+
+}
+);
+
+function scheduleAutocomplete(){
+
+if(
+currentFileProtected
+||
+!currentFile
+||
+currentFile
+.toLowerCase()
+.endsWith('.env')
+)
+return;
+
+clearTimeout(
+window.completeTimer
+);
+
+window.completeTimer=
+setTimeout(
+()=>{
+
+const pos=
+editor.getCursor();
+
+const ch=
+editor.getRange(
+{
+line:pos.line,
+ch:Math.max(
+0,
+pos.ch-1
+)
+},
+pos
+);
+
+if(
+/[A-Za-z0-9_.]/.test(ch)
+)
+showCompletions();
+
+},
+120
+);
+
+}
+
+function completionPrefix(cm){
+
+const cursor=
+cm.getCursor();
+
+const line=
+cm.getLine(
+cursor.line
+);
+
+const before=
+line.slice(
+0,
+cursor.ch
+);
+
+const match=
+before.match(
+/[A-Za-z_$][\w$]*$/
+);
+
+return {
+prefix:
+match
+?match[0]
+:'',
+before
+};
+
+}
+
+function inferLibraries(
+text
+){
+
+const result=[];
+
+if(
+/\bimport\s+discord\b
+|from\s+discord\b
+|discord\.py/i.test(text)
+)
+result.push(
+'discord.py'
+);
+
+if(
+/require\(['"]discord\.js
+|from\s+['"]discord\.js
+|discord\.js/i.test(text)
+)
+result.push(
+'discord.js'
+);
+
+if(
+/from\s+flask\b
+|import\s+flask\b
+|Flask\(/.test(text)
+)
+result.push(
+'flask'
+);
+
+if(
+/from\s+fastapi\b
+|FastAPI\(/.test(text)
+)
+result.push(
+'fastapi'
+);
+
+if(
+/\brequests\./.test(text)
+)
+result.push(
+'requests'
+);
+
+if(
+/\baiohttp\./.test(text)
+)
+result.push(
+'aiohttp'
+);
+
+if(
+/\basyncio\./.test(text)
+)
+result.push(
+'asyncio'
+);
+
+if(
+/\bos\./.test(text)
+)
+result.push(
+'os'
+);
+
+if(
+/\bPath\b
+|pathlib/.test(text)
+)
+result.push(
+'pathlib'
+);
+
+if(
+/\bjson\./.test(text)
+)
+result.push(
+'json'
+);
+
+if(
+/\bsubprocess\./.test(text)
+)
+result.push(
+'subprocess'
+);
+
+if(
+/require\(['"](?:node:)?fs
+|from\s+['"]node:fs/.test(text)
+)
+result.push(
+'node:fs'
+);
+
+if(
+/require\(['"](?:node:)?path
+|from\s+['"]node:path/.test(text)
+)
+result.push(
+'node:path'
+);
+
+if(
+/express\(/.test(text)
+)
+result.push(
+'express'
+);
+
+if(
+/from\s+['"]react['"]
+|import\s+React/.test(text)
+)
+result.push(
+'react'
+);
+
+if(
+/from\s+['"]vue['"]/.test(text)
+)
+result.push(
+'vue'
+);
+
+if(
+/\bnumpy\b
+|\bnp\./.test(text)
+)
+result.push(
+'numpy'
+);
+
+if(
+/\bpandas\b
+|\bpd\./.test(text)
+)
+result.push(
+'pandas'
+);
+
+if(
+/\btkinter\b/.test(text)
+)
+result.push(
+'tkinter'
+);
+
+return[
+...new Set(
+result
+)
+];
+
+}
+
+function localIdentifiers(
+text
+){
+
+const values=
+new Set();
+
+for(
+const match of text.matchAll(
+/\b(?:class|def|function|const|let|var|fn|func|struct|interface|enum|type)\s+([A-Za-z_$][\w$]*)/g
+)
+)
+values.add(
+match[1]
+);
+
+for(
+const match of text.matchAll(
+/\b(?:import|from)\s+([A-Za-z_$][\w$.-]*)/g
+)
+)
+values.add(
+match[1]
+);
+
+return[
+...values
+];
+
+}
+
+function hintData(cm){
+
+const cursor=
+cm.getCursor();
+
+const line=
+cm.getLine(
+cursor.line
+);
+
+const before=
+line.slice(
+0,
+cursor.ch
+);
+
+const tokenMatch=
+before.match(
+/[A-Za-z_$][\w$]*$/
+);
+
+const prefix=
+tokenMatch
+?tokenMatch[0]
+:'';
+
+const text=
+cm.getValue();
+
+let pool=[];
+
+const lang=
+languageKey(
+currentFile||''
+);
+
+pool=
+pool.concat(
+COMPLETIONS[lang]
+||
+COMPLETIONS.javascript
+);
+
+for(
+const lib
+of inferLibraries(text)
+){
+
+pool=
+pool.concat(
+LIBRARY_COMPLETIONS[lib]
+||[]
+);
+
+}
+
+pool=
+pool.concat(
+localIdentifiers(text)
+);
+
+if(
+\.([A-Za-z_$][\w$]*)?$/.test(
+before
+)
+){
+
+for(
+const lib
+of Object.values(
+LIBRARY_COMPLETIONS
+)
+){
+
+pool=
+pool.concat(
+lib
+);
+
+}
+
+}
+
+pool=[
+...new Set(
+pool
+)
+]
+.filter(
+v=>
+String(v)
+.toLowerCase()
+.startsWith(
+prefix.toLowerCase()
+)
+);
+
+const start={
+line:cursor.line,
+ch:cursor.ch-prefix.length
+};
+
+return{
+list:pool.slice(
+0,
+120
+),
+from:start,
+to:cursor
+};
+
+}
+
+function showCompletions(){
+
+if(
+!currentFile
+||
+currentFileProtected
+||
+currentFile.toLowerCase().endsWith('.env')
+)
+return;
+
+CodeMirror.showHint(
+editor,
+hintData,
+{
+completeSingle:false,
+alignWithWord:true,
+closeOnUnfocus:true
+}
+);
+
+}
+
+editor.setOption(
+'extraKeys',
+{
+'Ctrl-S':saveFile,
+'Cmd-S':saveFile,
+'Ctrl-Space':showCompletions,
+'Ctrl- ':showCompletions
+}
+);
+
+function clearLintMarks(){
+
+if(editor._vstermuLintMarks)
+editor._vstermuLintMarks.forEach(
+mark=>mark.clear()
+);
+
+editor._vstermuLintMarks=[];
+
+}
+
+function renderLintErrors(
+errors
+){
+
+clearLintMarks();
+
+if(
+!errors
+||
+!errors.length
+||
+!currentFile
+||
+currentFileProtected
+)
+return;
+
+editor._vstermuLintMarks=
+errors
+.slice(
+0,
+10
+)
+.map(
+err=>{
+
+const line=
+Math.max(
+0,
+Math.min(
+err.line,
+editor.lineCount()-1
+)
+);
+
+const ch=
+Math.max(
+0,
+Math.min(
+err.column,
+editor.getLine(line).length
+)
+);
+
+const end=
+Math.min(
+editor.getLine(line).length,
+Math.max(
+ch+1,
+ch+12
+)
+);
+
+return editor.markText(
+{
+line,
+ch
+},
+{
+line,
+ch:end
+},
+{
+className:
+'CodeMirror-lint-mark-error',
+title:err.message,
+clearOnEnter:false
+}
+);
+
+}
+);
+
+}
+
+function scheduleLint(){
+
+if(
+!currentFile
+||
+currentFileProtected
+||
+currentFile.toLowerCase().endsWith('.env')
+||
+currentFile.split('/').pop()==='vstermu-installer.py'
+)
+return;
+
+clearTimeout(
+lintTimer
+);
+
+lintTimer=
+setTimeout(
+runLintRequest,
+450
+);
+
+}
+
+async function runLintRequest(){
+
+if(
+!currentFile
+||
+currentFileProtected
+)
+return;
+
+try{
+
+const d=
+await api(
+'/api/lint',
+{
+method:'POST',
+body:JSON.stringify(
+{
+filename:
+currentFile
+.split('/')
+.pop(),
+content:
+editor.getValue()
+}
+)
+}
+);
+
+if(currentFile)
+renderLintErrors(
+d.errors
+);
+
+}catch(e){}
+
+}
 
 function sendWS(packet){
 
 if(
-ws&&
+ws
+&&
 ws.readyState===1
 )
 ws.send(
@@ -3867,10 +7414,6 @@ $('termState')
 .textContent=
 'connected';
 
-$('statusDot')
-.style.background=
-'var(--accent)';
-
 term.focus();
 
 fitTerminal();
@@ -3878,10 +7421,42 @@ fitTerminal();
 };
 
 ws.onmessage=
-e=>
+e=>{
+
+if(
+typeof e.data==='string'
+&&
+e.data.startsWith('{')
+){
+
+try{
+
+const control=
+JSON.parse(
+e.data
+);
+
+if(
+control.__vstermu
+){
+
+handleControl(
+control.__vstermu
+);
+
+return;
+
+}
+
+}catch(err){}
+
+}
+
 term.write(
 e.data
 );
+
+};
 
 ws.onclose=
 ()=>{
@@ -3889,10 +7464,6 @@ ws.onclose=
 $('termState')
 .textContent=
 'reconnecting';
-
-$('statusDot')
-.style.background=
-'var(--danger)';
 
 clearTimeout(
 reconnectTimer
@@ -3911,48 +7482,48 @@ ws.onerror=
 
 }
 
-term.onData(
-data=>
-sendWS(
-{
-type:'input',
-data
-}
+function handleControl(
+control
+){
+
+if(
+control.action==='env_enable'
 )
+terminalCommand(
+'.env enable'
 );
 
-term.onResize(
-size=>
-sendWS(
-{
-type:'resize',
-cols:size.cols,
-rows:size.rows
-}
+else if(
+control.action==='env_unenable'
 )
+terminalCommand(
+'.env unenable'
 );
 
-function fitTerminal(){
-
-try{
-
-fitAddon.fit();
-
-sendWS(
-{
-type:'resize',
-cols:term.cols,
-rows:term.rows
-}
+else if(
+control.action==='toast'
+)
+toast(
+control.message||''
 );
-
-}catch(e){}
 
 }
 
 window.addEventListener(
 'resize',
-fitTerminal
+()=>{
+
+clearTimeout(
+window.fitTimer
+);
+
+window.fitTimer=
+setTimeout(
+fitTerminal,
+80
+);
+
+}
 );
 
 async function init(){
@@ -3961,6 +7532,8 @@ try{
 
 await loadStyle();
 
+await loadEnvStatus();
+
 await loadRoots();
 
 const state=
@@ -3968,7 +7541,12 @@ await api(
 '/api/state'
 );
 
-if(state.lastFile){
+envEnabled=
+!!state.envEnabled;
+
+if(
+state.lastFile
+){
 
 try{
 
@@ -3991,8 +7569,16 @@ e.message
 connectTerminal();
 
 setTimeout(
-fitTerminal,
-200
+()=>{
+$('welcomeScreen')
+.classList.add(
+'hide'
+);
+
+fitTerminal();
+
+},
+650
 );
 
 }
@@ -4009,11 +7595,24 @@ ensure_data_files()
 
 
 if __name__ == "__main__":
+
     print(APP_NAME)
-    print(f"Home: {HOME}")
-    print(f"Shared: {SHARED}")
-    print(f"Data: {DATA_ROOT}")
-    print(f"Open: http://{HOST}:{PORT}")
+
+    print(
+        f"Home: {HOME}"
+    )
+
+    print(
+        f"Shared: {SHARED}"
+    )
+
+    print(
+        f"Data: {DATA_ROOT}"
+    )
+
+    print(
+        f"Open: http://{HOST}:{PORT}"
+    )
 
     app.run(
         host=HOST,
